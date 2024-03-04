@@ -2,88 +2,111 @@ import streamlit as st
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 from langchain.text_splitter import CharacterTextSplitter
-from langchain_community.vectorstores import FAISS
+from langchain.embeddings import OpenAIEmbeddings, HuggingFaceInstructEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.chat_models import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import OpenAIEmbeddings
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
 from htmlTemplates import css, bot_template, user_template
+from langchain.llms import HuggingFaceHub
 
 def get_pdf_text(pdf_docs):
-    text=""
+    text = ""
     for pdf in pdf_docs:
-        pdf_reader=PdfReader(pdf)
+        pdf_reader = PdfReader(pdf)
         for page in pdf_reader.pages:
-            text+=page.extract_text()
+            text += page.extract_text()
     return text
 
+
 def get_text_chunks(text):
-    textsplitter=CharacterTextSplitter(
+    text_splitter = CharacterTextSplitter(
         separator="\n",
         chunk_size=1000,
-        chunk_overlap=250,
+        chunk_overlap=200,
         length_function=len
-
     )
-    chunks=textsplitter.split_text(text)
+    chunks = text_splitter.split_text(text)
     return chunks
 
-def get_conversation_chain(vectorestores):
-    llm=ChatGoogleGenerativeAI(model="gemini")
-    memory=ConversationBufferMemory(memory_key='chat history', return_messages=True) # initialize memory
-    conversation_chain=ConversationalRetrievalChain.from_llm(
-        llm=llm,retriever=vectorestores.as_retriever(),memory=memory
+
+def get_vectorstore(text_chunks):
+    embeddings = OpenAIEmbeddings()
+    # embeddings = HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-xl")
+    vectorstore = FAISS.from_texts(texts=text_chunks, embedding=embeddings)
+    return vectorstore
+
+
+def get_conversation_chain(vectorstore):
+    # llm = ChatOpenAI()
+    llm=ChatGoogleGenerativeAI(model="gemini-pro",convert_system_message_to_human=True)
+    # llm = HuggingFaceHub(repo_id="google/flan-t5-xxl", model_kwargs={"temperature":0.5, "max_length":512})
+
+    memory = ConversationBufferMemory(
+        memory_key='chat_history', return_messages=True)
+    conversation_chain = ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=vectorstore.as_retriever(),
+        memory=memory
     )
     return conversation_chain
 
 
+def handle_userinput(user_question):
+    if 'conversation' not in st.session_state or st.session_state.conversation is None:
+        st.error("Conversation is not initialized. Please upload PDFs and process them first.")
+        return
 
-def get_vectorestore(text_chunks):
-    embedding=OpenAIEmbeddings(model="text-embedding-3-small")
-    vectorestore=FAISS.from_texts(text_chunks,embedding=embedding)
-    return vectorestore
+    response = st.session_state.conversation({'question': user_question})
+    st.session_state.chat_history = response['chat_history']
+
+    for i, message in enumerate(st.session_state.chat_history):
+        if i % 2 == 0:
+            st.write(user_template.replace(
+                "{{MSG}}", message.content), unsafe_allow_html=True)
+        else:
+            st.write(bot_template.replace(
+                "{{MSG}}", message.content), unsafe_allow_html=True)
 
 
 def main():
     load_dotenv()
-    st.set_page_config("Chat with multiple pdfs", page_icon=":books:")
+    st.set_page_config(page_title="Chat with multiple PDFs",
+                       page_icon=":books:")
     st.write(css, unsafe_allow_html=True)
 
     if "conversation" not in st.session_state:
-        st.session_state.conversation=None
+        pdf_docs = None
+        if pdf_docs is not None:
+            raw_text = get_pdf_text(pdf_docs)
+            text_chunks = get_text_chunks(raw_text)
+            vectorstore = get_vectorstore(text_chunks)
+            st.session_state.conversation = get_conversation_chain(vectorstore)
+            # Initialisation avec la question spécifiée
+            st.session_state.conversation({'question': "Three Reasons to Address AI in Education Now"})
 
-
-
-
-    st.header("Chat with multiple pdfs :books:")
-    st.text_input("Ask a question about your documents: ")
-
-    st.write(user_template.replace("{{MSG}}","Hello robot"), unsafe_allow_html=True)
-    st.write(bot_template.replace("{{MSG}}","Hello human"), unsafe_allow_html=True)
+    st.header("Chat with multiple PDFs :books:")
+    user_question = st.text_input("Ask a question about your documents:")
+    if user_question:
+        handle_userinput(user_question)
 
     with st.sidebar:
         st.subheader("Your documents")
-        pdf_docs=st.file_uploader("Upload your pdfs",type="pdf",accept_multiple_files=True)
-        if st.button("Run"):
-            with st.spinner("Loading..."):
-                #get pdfs and chuncks of text
-                raw_text=get_pdf_text(pdf_docs)
-                # st.write(raw_text)
+        pdf_docs = st.file_uploader(
+            "Upload your PDFs here and click on 'Process'", accept_multiple_files=True)
+        if st.button("Process"):
+            with st.spinner("Processing"):
+                if pdf_docs is None or len(pdf_docs) == 0:
+                    st.error("Please upload at least one PDF document.")
+                    return
 
-                #get text chunks
-                text_chunks=get_text_chunks(raw_text)
-                # st.write(text_chunks)
-
-                #vetoriser
-                vectorstore=get_vectorestore(text_chunks)
-
-                #conversation
-                st.session_state.conversation=get_conversation_chain(vectorstore) #st.state object increase the scope a variable outside st.sidebar
-
-    st.session_state.conversation
+                raw_text = get_pdf_text(pdf_docs)
+                text_chunks = get_text_chunks(raw_text)
+                vectorstore = get_vectorstore(text_chunks)
+                st.session_state.conversation = get_conversation_chain(
+                    vectorstore)
 
 
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
